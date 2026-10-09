@@ -7,7 +7,7 @@
 const { Engine, World, Bodies, Body, Events } = Matter;
 
 /* ---------------- 可调参数 ---------------- */
-const W = 420, H = 620;          // 逻辑画布
+const W = 360, H = 620;          // 逻辑画布（收窄以贴近参考图比例，也让堆叠更快触线）
 const WALL = 16, FLOOR = 18;     // 侧壁 / 地板厚度
 const DROP_LINE = 190;           // 虚线：奶龙顶部越过它并停住即判负（碰撞体改矩形后更耐堆，线下移补偿局时）
 const HOLD_Y = 64;               // 手持件中心高度
@@ -116,15 +116,18 @@ buildWalls();
 
 function makeBody(x, y, tier) {
   const t = TIERS[tier];
-  const c = colliderBox(tier);
-  const cham = Math.min(c.w, c.h) * 0.16;   // 圆角：边角不卡、能滑能滚一点
-  const b = Bodies.rectangle(x, y, c.w, c.h, {
-    chamfer: { radius: cham },
+  const b = Bodies.fromVertices(x, y, [hullVerts(tier)], {
     restitution: 0.04, friction: 0.42, frictionAir: 0.02, density: 0.0016,
   });
-  // 重心压到下半身：平底+低重心 => 站得稳，受撞歪了重力矩扶正，推过支撑面才会真倒
-  Body.setCentre(b, { x: 0, y: (c.h / 2) * t.com }, true);
-  b.tier = tier; b.born = performance.now(); b.overSince = null; b.dead = false;
+  // fromVertices 把质心放在 (x,y)；凸包质心 != 包围盒中心，
+  // 这里把"包围盒中心"对齐到 (x,y)，绘制以 position 为中心才不会和碰撞体错位
+  const vs = b.vertices;
+  let mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
+  for (const v of vs) { if (v.x < mnx) mnx = v.x; if (v.x > mxx) mxx = v.x; if (v.y < mny) mny = v.y; if (v.y > mxy) mxy = v.y; }
+  Body.setPosition(b, { x: x + (x - (mnx + mxx) / 2), y: y + (y - (mny + mxy) / 2) });
+  // 重心压到下半身：受撞会歪、重力矩扶正，推过支撑面才会真倒
+  Body.setCentre(b, { x: 0, y: hullExt(tier).hh * t.com }, true);
+  b.tier = tier; b.born = simTime; b.overSince = null; b.dead = false;
   return b;
 }
 const pieces = () => Composite_bodies().filter((b) => b.tier !== undefined && !b.dead);
@@ -136,6 +139,7 @@ let best = +(localStorage.getItem(BEST_KEY) || 0);
 let curTier = 0, nextTier = 0;
 let aimX = W / 2, aiming = false, lastDrop = -9999;
 let over = false, started = false;
+let simTime = 0;   // 模拟时钟(ms)：无头 step() 与真机 rAF 共用，判负计时不依赖真实时间
 const fx = [];
 
 const el = {
@@ -228,11 +232,26 @@ function colliderBox(tier) {
   const d = drawnBox(tier);
   return { w: d.w * COL_K, h: d.h * COL_K };
 }
+// 贴合贴图的凸包碰撞体（scripts/gen_hulls.js 由 alpha 通道生成，归一化到主体包围盒）
+function hullVerts(tier) {
+  const h = window.HULLS[TIERS[tier].file];
+  const c = colliderBox(tier);
+  return h.pts.map(([x, y]) => ({ x: x * c.w, y: y * c.h }));
+}
+function hullExt(tier) {
+  const h = window.HULLS[TIERS[tier].file];
+  const c = colliderBox(tier);
+  return {
+    hw: Math.max(-h.ext.l, h.ext.r) * c.w,      // 半宽
+    top: h.ext.t * c.h,                          // 顶边（负值，相对中心）
+    hh: (h.ext.b - h.ext.t) / 2 * c.h,           // 半高
+  };
+}
 function holdY(tier) {
-  return Math.max(HOLD_Y, colliderBox(tier).h / 2 + 6);
+  return Math.max(HOLD_Y, drawnBox(tier).h / 2 + 6);
 }
 function aimClamp(x, tier) {
-  const half = colliderBox(tier).w / 2;
+  const half = hullExt(tier).hw;
   return Math.min(W - WALL - half, Math.max(WALL + half, x));
 }
 function drop() {
@@ -251,7 +270,7 @@ function drop() {
 function checkOver(now) {
   for (const b of pieces()) {
     if (now - b.born < 500) continue;
-    const topY = b.position.y - colliderBox(b.tier).h / 2;
+    const topY = b.position.y + hullExt(b.tier).top;
     const calm = b.speed < 0.28;
     if (topY < DROP_LINE && calm) {
       if (b.overSince == null) b.overSince = now;
@@ -399,11 +418,12 @@ function stabilize() {
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(32, now - last); last = now;
+  if (!over) simTime += dt;
   if (!over) {
     for (let i = 0; i < SIM_SPEED; i++) Engine.update(engine, dt);   // 子步数=速度倍率，比调重力稳
     stabilize();
     processMerges();
-    if (started && checkOver(now)) gameOver();
+    if (started && checkOver(simTime)) gameOver();
   }
   drawBackdrop();
   for (const b of pieces()) drawTier(b.tier, b.position.x, b.position.y, null, b.angle);
@@ -419,11 +439,22 @@ requestAnimationFrame(frame);
    纯调试用，不影响正常玩法，发布要删可以整段删掉。 */
 window.NAIWA = {
   dropAt(x, tier) { if (tier != null) curTier = Math.max(0, Math.min(TOP, tier)); aimX = x; lastDrop = -9999; drop(); },
+  // 后台标签页 rAF 会暂停，用这个手动推进物理做无头验证
+  step(n, dt) {
+    for (let i = 0; i < (n || 1); i++) {
+      const sdt = dt || 16.7; simTime += sdt;
+      Engine.update(engine, sdt); stabilize(); processMerges();
+      if (started && checkOver(simTime)) gameOver();
+    }
+  },
+  render() { drawBackdrop(); for (const b of pieces()) drawTier(b.tier, b.position.x, b.position.y, null, b.angle); drawAim(); drawFx(performance.now()); },
   stat() {
     return {
       score, best, pieces: pieces().length, tiers: pieces().map((b) => b.tier), over, cur: curTier, next: nextTier,
       // 调试用：每个体的倾角(度)，验证重心扶正效果
       angles: pieces().map((b) => Math.round((b.angle * 180 / Math.PI) % 360)),
+      // 调试用：堆顶 y（越小越高），调 DROP_LINE 用
+      tops: pieces().map((b) => Math.round(b.position.y + hullExt(b.tier).top)).sort((a, b) => a - b).slice(0, 4),
     };
   },
   reset, TIERS,

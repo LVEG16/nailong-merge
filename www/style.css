@@ -3,16 +3,16 @@
   --line:#f0e2d0; --red:#f4535b; --red-dark:#e23b44; --gold:#e8a33d;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{height:100%}
+html,body{min-height:100%}
 body{
   margin:0; padding:14px 0 26px;
   font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   color:var(--ink);
   background:linear-gradient(180deg,#fdf4e8 0%,#fbeee0 52%,#f7dede 100%);
-  display:flex; justify-content:center;
+  display:flex; justify-content:center; align-items:flex-start;
   overscroll-behavior:none;
 }
-.stage{width:min(94vw,440px); display:flex; flex-direction:column; align-items:center}
+.stage{width:min(94vw,440px); display:flex; flex-direction:column; align-items:center; flex:none}
 
 .title{
   margin:2px 0 12px; font-size:23px; font-weight:700; letter-spacing:2px;
@@ -49,13 +49,13 @@ body{
 
 /* 棋盘 */
 .board{
-  position:relative; width:100%; margin-top:12px;
+  position:relative; margin:12px auto 0;
   background:linear-gradient(180deg,#fffaf3,#fdf1e4);
   border:1px solid var(--line); border-radius:20px;
   box-shadow:0 8px 26px rgba(190,150,110,.16);
   overflow:hidden; touch-action:none;
 }
-canvas{display:block; width:100%; height:auto}
+canvas{display:block}
 .next-box{
   position:absolute; right:12px; top:10px; display:flex; align-items:center; gap:6px;
   font-size:12px; color:var(--ink-soft); letter-spacing:1px;

@@ -38,15 +38,34 @@ const BEST_KEY = 'nailong.best.v1';
 /* ---------------- 画布 ---------------- */
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-function fit() {
+const boardEl = document.getElementById('board');
+const stageEl = document.querySelector('.stage');
+const MARGINS = 34;      // board/chain/hint 三段 margin 合计
+const BODY_PAD = 40;     // body 上下 padding
+const BADGE = 34;        // Netlify 免费角标额外留白，别压住底部提示
+function layout() {
   const dpr = Math.min(2.5, window.devicePixelRatio || 1);
   canvas.width = Math.round(W * dpr);
   canvas.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingQuality = 'high';
+  // 先放开尺寸量出"棋盘以外"占的高度，再把剩余视口高度分给棋盘：
+  // 手机上不会被 flex 压扁裁掉底部，也不需要滚动
+  canvas.style.width = '100%'; canvas.style.height = 'auto';
+  boardEl.style.width = '';
+  let others = 0;
+  for (const el of stageEl.children) if (el !== boardEl) others += el.getBoundingClientRect().height;
+  const avail = window.innerHeight - others - MARGINS - BODY_PAD - BADGE;
+  const byWidth = stageEl.clientWidth * H / W;
+  const cssH = Math.max(300, Math.min(byWidth, avail));
+  const cssW = Math.min(stageEl.clientWidth, cssH * W / H);
+  canvas.style.height = Math.round(cssH) + 'px';
+  canvas.style.width = Math.round(cssW) + 'px';
+  boardEl.style.width = Math.round(cssW + 2) + 'px';   // border-box，含 1px 边框×2
 }
-fit();
-addEventListener('resize', fit);
+layout();
+addEventListener('resize', layout);
+addEventListener('orientationchange', layout);
 
 /* ---------------- 素材 ---------------- */
 const imgs = TIERS.map((t) => {

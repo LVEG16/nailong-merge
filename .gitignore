@@ -1,0 +1,9 @@
+node_modules/
+server.log
+assets_out/
+qa/
+_discarded/
+preview_*.png
+dbg_*.png
+exp_*.png
+test_*.png

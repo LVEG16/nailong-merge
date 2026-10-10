@@ -5,6 +5,7 @@
 (() => {
 'use strict';
 const { Engine, World, Bodies, Body, Events } = Matter;
+if (window.decomp && Matter.Common && Matter.Common.setDecomp) Matter.Common.setDecomp(window.decomp);  // 凹多边形碰撞体分解
 
 /* ---------------- 可调参数 ---------------- */
 const W = 360, H = 620;          // 逻辑画布（收窄以贴近参考图比例，也让堆叠更快触线）
@@ -175,9 +176,12 @@ function reset() {
 
 /* ---------------- 合成 ---------------- */
 let merges = [];
+// 凹多边形刚体是复合体，碰撞 pair 里给的是子部件，要沿 parent 链取到带 tier 的根刚体
+const rootBody = (b) => { let x = b; while (x.parent && x.parent !== x) x = x.parent; return x; };
 Events.on(engine, 'collisionStart', (ev) => {
   for (const p of ev.pairs) {
-    const a = p.bodyA, b = p.bodyB;
+    const a = rootBody(p.bodyA), b = rootBody(p.bodyB);
+    if (a === b) continue;
     if (a.tier === undefined || b.tier === undefined) continue;
     if (a.tier !== b.tier || a.dead || b.dead) continue;
     merges.push([a, b]);
@@ -232,14 +236,14 @@ function colliderBox(tier) {
   const d = drawnBox(tier);
   return { w: d.w * COL_K, h: d.h * COL_K };
 }
-// 贴合贴图的凸包碰撞体（scripts/gen_hulls.js 由 alpha 通道生成，归一化到主体包围盒）
+// 贴合贴图轮廓的凹多边形碰撞体（scripts/gen_outline.js 由 alpha 通道生成，归一化到主体包围盒）
 function hullVerts(tier) {
-  const h = window.HULLS[TIERS[tier].file];
+  const h = window.OUTLINES[TIERS[tier].file];
   const c = colliderBox(tier);
   return h.pts.map(([x, y]) => ({ x: x * c.w, y: y * c.h }));
 }
 function hullExt(tier) {
-  const h = window.HULLS[TIERS[tier].file];
+  const h = window.OUTLINES[TIERS[tier].file];
   const c = colliderBox(tier);
   return {
     hw: Math.max(-h.ext.l, h.ext.r) * c.w,      // 半宽
@@ -457,6 +461,6 @@ window.NAIWA = {
       tops: pieces().map((b) => Math.round(b.position.y + hullExt(b.tier).top)).sort((a, b) => a - b).slice(0, 4),
     };
   },
-  reset, TIERS,
+  reset, TIERS, engine, world,
 };
 })();

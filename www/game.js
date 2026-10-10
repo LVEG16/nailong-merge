@@ -1,6 +1,6 @@
 /* 奶龙合成所 —— matter-js 物理 + canvas 2D 渲染
  * 玩法：拖动瞄准 → 松手投放 → 两个同阶奶龙相碰进化一级 → 堆过虚线判负
- * 逻辑坐标系固定 420x620，物理参数与分辨率无关，缩放只发生在绘制层。
+ * 逻辑坐标系固定 360x620，物理参数与分辨率无关，缩放只发生在绘制层。
  */
 (() => {
 'use strict';
@@ -10,7 +10,7 @@ if (window.decomp && Matter.Common && Matter.Common.setDecomp) Matter.Common.set
 /* ---------------- 可调参数 ---------------- */
 const W = 360, H = 620;          // 逻辑画布（收窄以贴近参考图比例，也让堆叠更快触线）
 const WALL = 16, FLOOR = 18;     // 侧壁 / 地板厚度
-const DROP_LINE = 190;           // 虚线：奶龙顶部越过它并停住即判负（碰撞体改矩形后更耐堆，线下移补偿局时）
+const DROP_LINE = 190;           // 虚线：奶龙顶部越过它并停住即判负
 const HOLD_Y = 64;               // 手持件中心高度
 const DROP_CD = 380;             // 两次投放最小间隔(ms)
 const OVER_MS = 1250;            // 压线停留多久判负(ms)
@@ -136,7 +136,9 @@ function Composite_bodies() { return world.bodies; }
 
 /* ---------------- 游戏状态 ---------------- */
 let score = 0;
-let best = +(localStorage.getItem(BEST_KEY) || 0);
+let best = 0, bestAtStart = 0;
+try { best = Math.max(0, parseInt(localStorage.getItem(BEST_KEY), 10) || 0); } catch (e) { best = 0; }  // 隐私模式等场景 localStorage 可能抛错
+bestAtStart = best;
 let curTier = 0, nextTier = 0;
 let aimX = W / 2, aiming = false, lastDrop = -9999;
 let over = false, started = false;
@@ -161,14 +163,19 @@ function rollTier() {
 function setScore(v) {
   score = v;
   el.score.textContent = score;
-  if (score > best) { best = score; el.best.textContent = best; localStorage.setItem(BEST_KEY, best); }
+  if (score > best) {
+    best = score; el.best.textContent = best;
+    try { localStorage.setItem(BEST_KEY, best); } catch (e) { /* 存不了就只留内存 */ }
+  }
 }
 function refreshNext() { el.next.src = 'assets/' + TIERS[nextTier].file + '.png'; }
 
 function reset() {
   for (const b of pieces().slice()) World.remove(world, b);
   fx.length = 0;
+  merges.length = 0;          // 清掉未处理的合成队列，否则重开瞬间可能冒出幽灵合成
   over = false; started = false; lastDrop = -9999;
+  bestAtStart = best;
   el.over.hidden = true;
   setScore(0);
   curTier = rollTier(); nextTier = rollTier(); refreshNext();
@@ -251,6 +258,12 @@ function hullExt(tier) {
     hh: (h.ext.b - h.ext.t) / 2 * c.h,           // 半高
   };
 }
+// setCentre 会把 body.position 移到重心；立绘是按包围盒中心画的，
+// 所以绘制/判负都要用"包围盒中心"= position 减去旋转后的重心偏移
+function artCenter(b) {
+  const off = hullExt(b.tier).hh * TIERS[b.tier].com;
+  return { x: b.position.x + off * Math.sin(b.angle), y: b.position.y - off * Math.cos(b.angle) };
+}
 function holdY(tier) {
   return Math.max(HOLD_Y, drawnBox(tier).h / 2 + 6);
 }
@@ -274,7 +287,7 @@ function drop() {
 function checkOver(now) {
   for (const b of pieces()) {
     if (now - b.born < 500) continue;
-    const topY = b.position.y + hullExt(b.tier).top;
+    const topY = artCenter(b).y + hullExt(b.tier).top;
     const calm = b.speed < 0.28;
     if (topY < DROP_LINE && calm) {
       if (b.overSince == null) b.overSince = now;
@@ -287,7 +300,7 @@ function gameOver() {
   over = true;
   el.overTitle.textContent = '堆到线上了';
   el.overScore.textContent = score;
-  el.overNote.textContent = score >= best && score > 0 ? '新纪录！' : '最高分 ' + best;
+  el.overNote.textContent = score > bestAtStart && score > 0 ? '新纪录！' : '最高分 ' + best;
   el.over.hidden = false;
   sOver();
 }
@@ -361,11 +374,10 @@ function drawBackdrop() {
 
 function drawAim() {
   if (over) return;
-  const t = TIERS[curTier];
   const x = aimClamp(aimX, curTier), y = holdY(curTier);
   ctx.save();
   ctx.strokeStyle = 'rgba(180,160,140,.45)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 8]);
-  ctx.beginPath(); ctx.moveTo(x, y + t.r + 6); ctx.lineTo(x, H - FLOOR); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x, y + drawnBox(curTier).h / 2 + 4); ctx.lineTo(x, H - FLOOR); ctx.stroke();
   ctx.restore();
   drawTier(curTier, x, y, 1);
 }
@@ -404,7 +416,7 @@ function drawFx(now) {
   }
 }
 
-/* 倾角软上限：矩形碰撞体能紧密堆叠，但侧躺是稳定平衡会起不来；
+/* 倾角软上限：轮廓刚体被推过支撑面后侧躺是稳定平衡会起不来；
    这里在 |angle| 超过 MAX_TILT 时施加恢复，把它平滑拽回上限内（不倒翁的"自己爬起来"）。 */
 function stabilize() {
   for (const b of pieces()) {
@@ -430,7 +442,7 @@ function frame(now) {
     if (started && checkOver(simTime)) gameOver();
   }
   drawBackdrop();
-  for (const b of pieces()) drawTier(b.tier, b.position.x, b.position.y, null, b.angle);
+  for (const b of pieces()) { const c = artCenter(b); drawTier(b.tier, c.x, c.y, null, b.angle); }
   drawAim();
   drawFx(now);
   requestAnimationFrame(frame);
@@ -451,16 +463,46 @@ window.NAIWA = {
       if (started && checkOver(simTime)) gameOver();
     }
   },
-  render() { drawBackdrop(); for (const b of pieces()) drawTier(b.tier, b.position.x, b.position.y, null, b.angle); drawAim(); drawFx(performance.now()); },
+  render() { drawBackdrop(); for (const b of pieces()) { const c = artCenter(b); drawTier(b.tier, c.x, c.y, null, b.angle); } drawAim(); drawFx(performance.now()); },
   stat() {
     return {
       score, best, pieces: pieces().length, tiers: pieces().map((b) => b.tier), over, cur: curTier, next: nextTier,
       // 调试用：每个体的倾角(度)，验证重心扶正效果
       angles: pieces().map((b) => Math.round((b.angle * 180 / Math.PI) % 360)),
       // 调试用：堆顶 y（越小越高），调 DROP_LINE 用
-      tops: pieces().map((b) => Math.round(b.position.y + hullExt(b.tier).top)).sort((a, b) => a - b).slice(0, 4),
+      tops: pieces().map((b) => Math.round(artCenter(b).y + hullExt(b.tier).top)).sort((a, b) => a - b).slice(0, 4),
     };
   },
   reset, TIERS, engine, world,
+  // 自检：八阶「贴图 + 真实碰撞体(分解后的凸部件)」叠图，红线即实际碰撞几何
+  colliderSheet() {
+    const cell = 170, pad = 8, cols = 4, rows = 2;
+    const cv = document.createElement('canvas');
+    cv.width = cols * (cell + pad) + pad; cv.height = rows * (cell + pad) + pad;
+    const c = cv.getContext('2d');
+    c.fillStyle = '#20242e'; c.fillRect(0, 0, cv.width, cv.height);
+    TIERS.forEach((t, i) => {
+      const x0 = pad + (i % cols) * (cell + pad), y0 = pad + ((i / cols) | 0) * (cell + pad);
+      const cx = x0 + cell / 2, cy = y0 + cell / 2 + 6;
+      const d = drawnBox(i);
+      const scale = (cell * 0.9) / Math.max(d.w, d.h);
+      const side = ((2 * t.r * t.f) / FILL) * scale;
+      if (loaded[i]) c.drawImage(imgs[i], cx - side / 2, cy - side / 2, side, side);
+      const b = makeBody(0, 0, i);
+      c.strokeStyle = 'rgba(255,64,64,.95)'; c.lineWidth = 1.4;
+      for (const part of b.parts) {
+        c.beginPath();
+        part.vertices.forEach((v, k) => {
+          const ac = artCenter(b);
+          const px = cx + (v.x - ac.x) * scale, py = cy + (v.y - ac.y) * scale;
+          if (k) c.lineTo(px, py); else c.moveTo(px, py);
+        });
+        c.closePath(); c.stroke();
+      }
+      World.remove(world, b);
+      c.fillStyle = '#fff'; c.font = '11px sans-serif'; c.fillText((i + 1) + ' ' + t.name, x0 + 5, y0 + 14);
+    });
+    return cv.toDataURL('image/png');
+  },
 };
 })();

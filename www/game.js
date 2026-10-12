@@ -4,7 +4,7 @@
  */
 (() => {
 'use strict';
-const { Engine, World, Bodies, Body, Events } = Matter;
+const { Engine, World, Bodies, Body, Events, Sleeping } = Matter;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 /* ---------------- 可调参数 ---------------- */
@@ -30,7 +30,7 @@ const TIERS = [
   { file: '08_wave', name: '奶龙', r: 120, f: 1.06, ar: 0.70, com: 0.50, pts: 320 },
 ];
 const SIM_SPEED = 4;   // 每帧子步数：倍速=更多更小的步   // 每帧物理子步数：2 = 整体速度翻倍（掉落/滑落/ settling 都快一倍）
-const MAX_TILT = 0.52; // 倾角软上限(~30°)：范围内纯物理，超出用恢复力矩拽回，防止躺平/倒立
+let MAX_TILT = 0.52; // 倾角软上限(~30°)：范围内纯物理，超出用恢复力矩拽回，防止躺平/倒立
 const TOP = TIERS.length - 1;
 // 只投前三阶：手持件才不会顶出画面，也贴近参考图"掉最小的"手感
 const SPAWN_W = [0.30, 0.26, 0.20, 0.14, 0.10];   // 五阶投放：场上种类多 -> 同阶相邻概率低 -> 堆才长得起来（合成大西瓜靠 11 阶达到同样效果）
@@ -117,22 +117,31 @@ function buildWalls() {
 }
 buildWalls();
 
+function polyCentroid(poly) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const q = poly[(i + 1) % poly.length];
+    const cr = poly[i].x * q.y - q.x * poly[i].y;
+    a += cr; cx += (poly[i].x + q.x) * cr; cy += (poly[i].y + q.y) * cr;
+  }
+  a /= 2;
+  return { x: cx / (6 * a), y: cy / (6 * a) };
+}
 function makeBody(x, y, tier) {
   const t = TIERS[tier];
   const opts = { restitution: 0.02, friction: 0.28, frictionAir: 0.02, density: 0.0016 };
-  // 单凸体：fromVertices 按多边形面积质心平移到 (x,y)，所以传它自己的面积质心才能保持形状在原位
-  const pts = hullVerts(tier);
-  let a = 0, cx = 0, cy = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const q = pts[(i + 1) % pts.length];
-    const cr = pts[i].x * q.y - q.x * pts[i].y;
-    a += cr; cx += (pts[i].x + q.x) * cr; cy += (pts[i].y + q.y) * cr;
-  }
-  a /= 2; cx /= (6 * a); cy /= (6 * a);
-  const b = Bodies.fromVertices(cx, cy, [pts], opts);
-  // Body.create 把复合体放在部件质心（≈原点）；setPosition 是绝对赋值，
-  // 所以要"当前位置 + 期望位移"，把包围盒中心平移到 (x,y)，绘制以包围盒中心为准才不错位
-  const vs = b.vertices;
+  /* fromVertices 会把形状的面积质心平移到传入的 (x,y)。
+     复合体必须逐部件传入"部件自己的质心"：若都传同一个点，所有条带会被摆到原点叠在一起，
+     碰撞体塌成中间一条 —— 早年"复合体穿透 70-90px"的真凶就是这个，不是 Matter 解不动。 */
+  const polys = hullVerts(tier);
+  const partBodies = polys.map((poly) => {
+    const c = polyCentroid(poly);
+    return Bodies.fromVertices(c.x, c.y, [poly], opts);
+  });
+  const b = partBodies.length > 1 ? Body.create(Object.assign({ parts: partBodies }, opts)) : partBodies[0];
+  // Body.setPosition 是绝对赋值，所以要"当前位置 + 期望位移"，把包围盒中心平移到 (x,y)，绘制以包围盒中心为准才不错位。
+  // 复合体的 b.vertices 被 setParts 换成了"全部件的凸包再平移"，不可信，包围盒要从部件顶点算
+  const vs = b.parts.reduce((acc, p) => acc.concat(p.vertices), []);
   let mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
   for (const v of vs) { if (v.x < mnx) mnx = v.x; if (v.x > mxx) mxx = v.x; if (v.y < mny) mny = v.y; if (v.y > mxy) mxy = v.y; }
   Body.setPosition(b, {
@@ -140,8 +149,13 @@ function makeBody(x, y, tier) {
     y: b.position.y + (y - (mny + mxy) / 2),
   });
   // 重心压到下半身：受撞会歪、重力矩扶正，推过支撑面才会真倒
-  Body.setCentre(b, { x: 0, y: hullExt(tier).hh * t.com }, true);
+  const comD = hullExt(tier).hh * t.com;
+  Body.setCentre(b, { x: 0, y: comD }, true);
+  /* setCentre 只挪了参考点（求解器拿它当质心算力臂），惯量还是按几何中心算的：
+     少了平行轴那一项 m·d²，棋子比真实情况更容易被转歪 —— 看着就是"没根"地乱倾、动不动顶到倾角上限。 */
+  if (COM_FIX) Body.setInertia(b, b.inertia + b.mass * comD * comD);
   b.tier = tier; b.born = simTime; b.overSince = null; b.dead = false;
+  b.touchAt = -1e9;             // 上次碰到东西的时刻：判"是不是还在空中"
   b.readyAt = simTime + MERGE_CD;   // 出生冷却：打断"合成->立刻再合成"的瞬时连锁，让堆能长起来
   return b;
 }
@@ -187,6 +201,7 @@ function refreshNext() { el.next.src = 'assets/' + TIERS[nextTier].file + '.png'
 
 function reset() {
   for (const b of pieces().slice()) World.remove(world, b);
+  Matter.Pairs.clear(engine.pairs);   // 上一局的接触对里还留着已删除刚体，不清会污染碰撞检测/统计
   fx.length = 0;
   merges.length = 0;          // 清掉未处理的合成队列，否则重开瞬间可能冒出幽灵合成
   over = false; started = false; lastDrop = -9999;
@@ -200,7 +215,15 @@ function reset() {
 let merges = [];
 // 凹多边形刚体是复合体，碰撞 pair 里给的是子部件，要沿 parent 链取到带 tier 的根刚体
 const rootBody = (b) => { let x = b; while (x.parent && x.parent !== x) x = x.parent; return x; };
+/* 支撑追踪：倾角扶正只对"有东西托着"的棋子生效，
+   空中自由落体的棋子让它自然翻转（否则会出现悬在半空还硬撑着 30° 的怪画面） */
+const markTouch = (ev) => {
+  for (const p of ev.pairs) { rootBody(p.bodyA).touchAt = simTime; rootBody(p.bodyB).touchAt = simTime; }
+};
+Events.on(engine, 'collisionActive', markTouch);
+Events.on(engine, 'collisionEnd', markTouch);
 Events.on(engine, 'collisionStart', (ev) => {
+  markTouch(ev);
   for (const p of ev.pairs) {
     const a = rootBody(p.bodyA), b = rootBody(p.bodyB);
     if (a === b) continue;
@@ -237,6 +260,10 @@ function processMerges() {
     const mx = (a.position.x + b.position.x) / 2;
     const my = (a.position.y + b.position.y) / 2;
     World.remove(world, a); World.remove(world, b);
+    /* 支撑被合成掉了：Matter 不会因为"邻居消失"唤醒休眠体（afterCollisions 里
+       双方都睡着 或 对方是静态墙 都直接 continue），压在上面的棋子会永远冻在半空。
+       所以每次合成后全体唤醒，让堆重新沉降一次。 */
+    for (const o of pieces()) Sleeping.set(o, false);
     const t = a.tier;
 
     const nt = t + 1;
@@ -267,14 +294,11 @@ function colliderBox(tier) {
   const d = drawnBox(tier);
   return { w: d.w * COL_K, h: d.h * COL_K };
 }
-// 贴合贴图轮廓的凹多边形碰撞体（scripts/gen_outline.js 由 alpha 通道生成，归一化到主体包围盒）
+// 贴合贴图轮廓的碰撞体：colliders.js 里每阶 3 条竖向条带凸包（scripts/gen_colliders.js 由 alpha 通道生成，归一化到主体包围盒）
 function hullParts(tier) {
   const c = colliderBox(tier);
   return window.COLLIDERS[TIERS[tier].file].parts.map((part) => part.map(([x, y]) => ({ x: x * c.w, y: y * c.h })));
 }
-// 贴合贴图的碰撞体：条带点集合并后求凸包（单凸体）。
-// 凹多边形分解与条带复合体都试过：Matter 在 20+ 件堆叠时推不开（实测穿透 70-90px），
-// 单凸体是唯一堆叠稳健的选择；凹口（举手腋下等）会被凸包填掉，靠 COL_K 略缩补偿观感。
 function hull2d(pts) {
   const p = pts.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
   const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
@@ -284,8 +308,27 @@ function hull2d(pts) {
   lo.pop(); hi.pop();
   return lo.concat(hi);
 }
-const HULLS = TIERS.map((t, i) => hull2d(hullParts(i).flat()));
-function hullVerts(tier) { return HULLS[tier]; }
+/* 两套碰撞体：
+   PARTS  = 每阶 3 条竖向条带凸包组成的复合体，贴合贴图（凹口保留，刀盾的刀身之间不会被填实）
+   SINGLE = 条带点集合并后的单凸包，堆叠最稳，但凹口被填掉，棋子会停在看不见的凸包角上留出缝
+   默认 hybrid：只在"单凸包明显比立绘胖"的阶用 PARTS，其余用 SINGLE。 */
+const PARTS = TIERS.map((t, i) => hullParts(i).map((p) => hull2d(p)));
+const SINGLE = TIERS.map((t, i) => [hull2d(hullParts(i).flat())]);
+// 单凸包比立绘大多少（面积）：刀盾 26%、天使 6%，其余 ≤3.4%。
+// 差得多的那两阶用条带复合体（否则棋子会停在看不见的凸包角上，出现"隔空"缝），其余用单凸包（堆叠最稳）。
+const FAT = TIERS.map((t, i) => {
+  const area = (poly) => { let s = 0; for (let k = 0; k < poly.length; k++) { const p = poly[k], q = poly[(k + 1) % poly.length]; s += p.x * q.y - q.x * p.y; } return Math.abs(s / 2); };
+  const sa = PARTS[i].reduce((s, p) => s + area(p), 0);
+  return area(SINGLE[i][0]) / sa - 1;
+});
+let COL_MODE = 'hybrid';
+let COM_FIX = true;      // 重心下移后按平行轴定理补转动惯量
+const HYBRID_MIN = 0.05;
+function hullVerts(tier) {
+  if (COL_MODE === 'single') return SINGLE[tier];
+  if (COL_MODE === 'hybrid' && FAT[tier] < HYBRID_MIN) return SINGLE[tier];
+  return PARTS[tier];
+}
 function hullExt(tier) {
   const h = window.COLLIDERS[TIERS[tier].file];
   const c = colliderBox(tier);
@@ -460,33 +503,40 @@ function drawFx(now) {
 
 /* 收容：位置修正可能把刚体一步推出侧墙，这里每帧夹回场内，杜绝飞出场外 */
 function contain() {
+  let removed = false;
   for (const b of pieces()) {
     const e = hullExt(b.tier);
     const minX = WALL + e.hw * 0.6, maxX = W - WALL - e.hw * 0.6;
     if (b.position.x < minX) Body.setPosition(b, { x: minX, y: b.position.y });
     else if (b.position.x > maxX) Body.setPosition(b, { x: maxX, y: b.position.y });
-    if (b.position.y > H + 300) { b.dead = true; fellOut++; World.remove(world, b); }   // 万一掉出世界直接清掉，不卡判负
+    if (b.position.y > H + 300) { b.dead = true; fellOut++; removed = true; World.remove(world, b); }   // 万一掉出世界直接清掉，不卡判负
     if (b.position.y < -60) {   // 上边界护栏：被挤飞的棋子拦住并消掉上冲速度，不许飞出画面
       Body.setPosition(b, { x: b.position.x, y: -60 });
       if (b.velocity.y < 0) Body.setVelocity(b, { x: b.velocity.x, y: 0 });
     }
   }
+  if (removed) for (const b of pieces()) Sleeping.set(b, false);   // 支撑被清掉，全体重新沉降
 }
 
 /* 倾角软上限：轮廓刚体被推过支撑面后侧躺是稳定平衡会起不来；
-   这里在 |angle| 超过 MAX_TILT 时施加恢复，把它平滑拽回上限内（不倒翁的"自己爬起来"）。 */
+   这里在 |angle| 超过 MAX_TILT 时施加恢复，把它平滑拽回上限内（不倒翁的"自己爬起来"）。
+   只对"脚下有东西"的棋子生效：空中的棋子该自由翻转，硬扶正会拍成悬空斜靠的怪姿势。 */
 function stabilize() {
   for (const b of pieces()) {
+    if (b.isSleeping) continue;   // 休眠体由 Matter 冻结，写速度也没用，别做无用功
     // 速度上限：任何原因（合成落点、挤压）导致的爆速都夹住，杜绝弹飞出场
     const sp = Math.hypot(b.velocity.x, b.velocity.y);
     if (sp > 22) Body.setVelocity(b, { x: b.velocity.x * 22 / sp, y: b.velocity.y * 22 / sp });
+    if (simTime - b.touchAt > 180) continue;   // 180ms 内没碰过任何东西 = 空中，交给重力
     let a = b.angle;
     while (a > Math.PI) a -= Math.PI * 2;
     while (a < -Math.PI) a += Math.PI * 2;
-    if (Math.abs(a) <= MAX_TILT) continue;
-    const target = Math.sign(a) * MAX_TILT;
-    // 不用 setAngle 硬转（会把身体 teleport 进邻居），改用角速度平滑归位，让求解器继续管接触
-    Body.setAngularVelocity(b, b.angularVelocity * 0.5 + clamp((target - a) * 0.06, -0.12, 0.12));
+    const over = Math.abs(a) - MAX_TILT;
+    if (over <= 0) continue;
+    /* 只加"往回转正"的角速度，绝不给现有角速度打折。
+       之前写成 av*0.5 + 恢复量，等于在倾角上限处把旋转急刹住 —— 正在倒的棋子被冻在 30°，
+       看着就是"斜靠在空中"。现在是越歪越用力往回掰，掰不动也至少不会假死。 */
+    Body.setAngularVelocity(b, b.angularVelocity - Math.sign(a) * clamp(over * 0.5, 0, 0.09));
   }
 }
 
@@ -534,8 +584,15 @@ window.NAIWA = {
       angles: pieces().map((b) => Math.round((b.angle * 180 / Math.PI) % 360)),
       // 调试用：堆顶 y（越小越高），调 DROP_LINE 用
       tops: pieces().map((b) => Math.round(artCenter(b).y + hullExt(b.tier).top)).sort((a, b) => a - b).slice(0, 4),
+      col: COL_MODE, sleep: pieces().filter((b) => b.isSleeping).length,
+      pinned: pieces().filter((b) => Math.abs(b.angle) > MAX_TILT - 0.02).length,   // 顶到倾角上限的棋子数（越多越假）
     };
   },
+  // A/B 碰撞体：'hybrid'(默认，仅胖阶用条带) / 'parts'(全部条带复合体) / 'single'(全部单凸包)
+  setCol(mode) { if (['hybrid', 'parts', 'single'].includes(mode)) { COL_MODE = mode; reset(); } return { mode: COL_MODE, fat: FAT.map((v) => +(v * 100).toFixed(1)) }; },
+  setCom(on) { COM_FIX = !!on; reset(); return COM_FIX; },
+  setTilt(v) { MAX_TILT = v; reset(); return MAX_TILT; },
+  mk(x, y, t) { return makeBody(x, y, t); },   // 调试：建一个不入场地的刚体，看碰撞几何
   reset, TIERS, engine, world,
   fell() { return fellOut; },
   // 自检：八阶「贴图 + 真实碰撞体(分解后的凸部件)」叠图，红线即实际碰撞几何
@@ -554,7 +611,8 @@ window.NAIWA = {
       if (loaded[i]) c.drawImage(imgs[i], cx - side / 2, cy - side / 2, side, side);
       const b = makeBody(0, 0, i);
       c.strokeStyle = 'rgba(255,64,64,.95)'; c.lineWidth = 1.4;
-      for (const part of b.parts) {
+      const ps = b.parts.length > 1 ? b.parts.slice(1) : b.parts;   // 复合体的 parts[0] 是父体（顶点=全部部件的并集），画了会重复
+      for (const part of ps) {
         c.beginPath();
         part.vertices.forEach((v, k) => {
           const ac = artCenter(b);

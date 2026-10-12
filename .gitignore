@@ -1,5 +1,7 @@
 node_modules/
 server.log
+serve.log
+push_retry.log
 assets_out/
 qa/
 _discarded/

@@ -5,35 +5,35 @@
 (() => {
 'use strict';
 const { Engine, World, Bodies, Body, Events } = Matter;
-if (window.decomp && Matter.Common && Matter.Common.setDecomp) Matter.Common.setDecomp(window.decomp);  // 凹多边形碰撞体分解
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 /* ---------------- 可调参数 ---------------- */
 const W = 360, H = 620;          // 逻辑画布（收窄以贴近参考图比例，也让堆叠更快触线）
 const WALL = 16, FLOOR = 18;     // 侧壁 / 地板厚度
-const DROP_LINE = 190;           // 虚线：奶龙顶部越过它并停住即判负
+const DROP_LINE = 240;           // 虚线：奶龙顶部越过它并停住即判负
 const HOLD_Y = 64;               // 手持件中心高度
 const DROP_CD = 380;             // 两次投放最小间隔(ms)
 const OVER_MS = 1250;            // 压线停留多久判负(ms)
+const MERGE_CD = 500;            // 单个奶龙出生后多久才能参与合成(ms)
 const FILL = 0.9;                // 素材长边占 512 画布的比例（构建时归一化留的白）
 
 // r = 圆形碰撞体半径；f = 素材长边 / 碰撞体直径；ar = 主体宽高比（算手持高度与横向夹取）
 // com = 重心相对几何中心下移量（占 r 的比例）：质量压在肚子/下半身，落地会歪会晃再自己立正
 const TIERS = [
-  { file: '01_swirl', name: '便便', r: 26, f: 1.10, ar: 0.88, com: 0.42, pts: 5 },
-  { file: '02_angry', name: '怒球', r: 36, f: 1.06, ar: 0.97, com: 0.40, pts: 5 },
-  { file: '03_blade', name: '刀盾', r: 45, f: 1.16, ar: 1.60, com: 0.44, pts: 10 },
-  { file: '04_stand', name: '立胖', r: 55, f: 1.04, ar: 0.77, com: 0.50, pts: 20 },
-  { file: '05_belly', name: '摸肚', r: 66, f: 1.16, ar: 0.50, com: 0.52, pts: 40 },
-  { file: '06_sphinx', name: '狮身', r: 80, f: 1.06, ar: 1.12, com: 0.46, pts: 80 },
-  { file: '07_angel', name: '天使', r: 95, f: 1.10, ar: 0.80, com: 0.48, pts: 160 },
-  { file: '08_wave', name: '奶龙', r: 110, f: 1.06, ar: 0.70, com: 0.50, pts: 320 },
+  { file: '01_swirl', name: '便便', r: 33, f: 1.10, ar: 0.88, com: 0.42, pts: 5 },
+  { file: '02_angry', name: '怒球', r: 45, f: 1.06, ar: 0.97, com: 0.40, pts: 5 },
+  { file: '03_blade', name: '刀盾', r: 56, f: 1.16, ar: 1.60, com: 0.44, pts: 10 },
+  { file: '04_stand', name: '立胖', r: 69, f: 1.04, ar: 0.77, com: 0.50, pts: 20 },
+  { file: '05_belly', name: '摸肚', r: 83, f: 1.16, ar: 0.50, com: 0.52, pts: 40 },
+  { file: '06_sphinx', name: '狮身', r: 92, f: 1.06, ar: 1.12, com: 0.46, pts: 80 },
+  { file: '07_angel', name: '天使', r: 106, f: 1.10, ar: 0.80, com: 0.48, pts: 160 },
+  { file: '08_wave', name: '奶龙', r: 120, f: 1.06, ar: 0.70, com: 0.50, pts: 320 },
 ];
-const SIM_SPEED = 2;   // 每帧物理子步数：2 = 整体速度翻倍（掉落/滑落/ settling 都快一倍）
+const SIM_SPEED = 4;   // 每帧子步数：倍速=更多更小的步   // 每帧物理子步数：2 = 整体速度翻倍（掉落/滑落/ settling 都快一倍）
 const MAX_TILT = 0.52; // 倾角软上限(~30°)：范围内纯物理，超出用恢复力矩拽回，防止躺平/倒立
 const TOP = TIERS.length - 1;
 // 只投前三阶：手持件才不会顶出画面，也贴近参考图"掉最小的"手感
-const SPAWN_W = [0.42, 0.33, 0.25];
-const SPAWN_MAX = SPAWN_W.length - 1;
+const SPAWN_W = [0.30, 0.26, 0.20, 0.14, 0.10];   // 五阶投放：场上种类多 -> 同阶相邻概率低 -> 堆才长得起来（合成大西瓜靠 11 阶达到同样效果）
 const BEST_KEY = 'nailong.best.v1';
 
 /* ---------------- 画布 ---------------- */
@@ -97,18 +97,20 @@ function tone(freq, dur, type, vol, slideTo) {
 }
 const sDrop = () => tone(150, 0.10, 'sine', 0.05, 90);
 const sMerge = (t) => { tone(240 * Math.pow(1.19, t), 0.16, 'triangle', 0.075, 320 * Math.pow(1.19, t)); };
-const sBoom = () => { tone(180, 0.5, 'sawtooth', 0.07, 60); tone(520, 0.4, 'sine', 0.05, 1200); };
 const sOver = () => tone(330, 0.7, 'sine', 0.08, 80);
 
 /* ---------------- 物理世界 ---------------- */
 const engine = Engine.create();
 engine.gravity.y = 1;
+engine.positionIterations = 16;   // 复合体堆叠需要更多位置迭代
+engine.velocityIterations = 8;
+engine.enableSleeping = true;     // 静止棋子休眠：堆叠不再抖/不再被求解器压穿
 const world = engine.world;
 
 function buildWalls() {
   const opt = { isStatic: true, restitution: 0, friction: 0.3 };
   World.add(world, [
-    Bodies.rectangle(W / 2, H + FLOOR / 2, W * 3, FLOOR * 2, opt),
+    Bodies.rectangle(W / 2, H + 60, W * 3, 160, opt),   // 加厚地板：高速下落不会砸穿
     Bodies.rectangle(-WALL / 2, H / 2, WALL * 2, H * 4, opt),
     Bodies.rectangle(W + WALL / 2, H / 2, WALL * 2, H * 4, opt),
   ]);
@@ -117,18 +119,30 @@ buildWalls();
 
 function makeBody(x, y, tier) {
   const t = TIERS[tier];
-  const b = Bodies.fromVertices(x, y, [hullVerts(tier)], {
-    restitution: 0.04, friction: 0.42, frictionAir: 0.02, density: 0.0016,
-  });
-  // fromVertices 把质心放在 (x,y)；凸包质心 != 包围盒中心，
-  // 这里把"包围盒中心"对齐到 (x,y)，绘制以 position 为中心才不会和碰撞体错位
+  const opts = { restitution: 0.02, friction: 0.28, frictionAir: 0.02, density: 0.0016 };
+  // 单凸体：fromVertices 按多边形面积质心平移到 (x,y)，所以传它自己的面积质心才能保持形状在原位
+  const pts = hullVerts(tier);
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const q = pts[(i + 1) % pts.length];
+    const cr = pts[i].x * q.y - q.x * pts[i].y;
+    a += cr; cx += (pts[i].x + q.x) * cr; cy += (pts[i].y + q.y) * cr;
+  }
+  a /= 2; cx /= (6 * a); cy /= (6 * a);
+  const b = Bodies.fromVertices(cx, cy, [pts], opts);
+  // Body.create 把复合体放在部件质心（≈原点）；setPosition 是绝对赋值，
+  // 所以要"当前位置 + 期望位移"，把包围盒中心平移到 (x,y)，绘制以包围盒中心为准才不错位
   const vs = b.vertices;
   let mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
   for (const v of vs) { if (v.x < mnx) mnx = v.x; if (v.x > mxx) mxx = v.x; if (v.y < mny) mny = v.y; if (v.y > mxy) mxy = v.y; }
-  Body.setPosition(b, { x: x + (x - (mnx + mxx) / 2), y: y + (y - (mny + mxy) / 2) });
+  Body.setPosition(b, {
+    x: b.position.x + (x - (mnx + mxx) / 2),
+    y: b.position.y + (y - (mny + mxy) / 2),
+  });
   // 重心压到下半身：受撞会歪、重力矩扶正，推过支撑面才会真倒
   Body.setCentre(b, { x: 0, y: hullExt(tier).hh * t.com }, true);
   b.tier = tier; b.born = simTime; b.overSince = null; b.dead = false;
+  b.readyAt = simTime + MERGE_CD;   // 出生冷却：打断"合成->立刻再合成"的瞬时连锁，让堆能长起来
   return b;
 }
 const pieces = () => Composite_bodies().filter((b) => b.tier !== undefined && !b.dead);
@@ -142,7 +156,8 @@ bestAtStart = best;
 let curTier = 0, nextTier = 0;
 let aimX = W / 2, aiming = false, lastDrop = -9999;
 let over = false, started = false;
-let simTime = 0;   // 模拟时钟(ms)：无头 step() 与真机 rAF 共用，判负计时不依赖真实时间
+let simTime = 0;
+let fellOut = 0;   // 调试计数：掉出世界被收容删除的棋子数   // 模拟时钟(ms)：无头 step() 与真机 rAF 共用，判负计时不依赖真实时间
 const fx = [];
 
 const el = {
@@ -191,9 +206,27 @@ Events.on(engine, 'collisionStart', (ev) => {
     if (a === b) continue;
     if (a.tier === undefined || b.tier === undefined) continue;
     if (a.tier !== b.tier || a.dead || b.dead) continue;
+    if (a.tier === TOP) continue;   // 顶级为终端阶：不再合成，留在场上堵堆（合成大西瓜的经典压力源）
+    if (simTime < a.readyAt || simTime < b.readyAt) continue;
     merges.push([a, b]);
   }
 });
+
+// 合成新体的落点：中点若与现有棋子重叠就往上找空位，避免生成在别人身体里被求解器弹飞
+function freeSpot(x, y, tier) {
+  for (let k = 0; k < 7; k++) {
+    const py = y - k * 14;
+    let ok = true;
+    for (const o of pieces()) {
+      if (o.dead) continue;
+      const rr = (TIERS[tier].r + TIERS[o.tier].r) * 0.85;
+      const dx = o.position.x - x, dy = o.position.y - py;
+      if (dx * dx + dy * dy < rr * rr) { ok = false; break; }
+    }
+    if (ok) return { x, y: py };
+  }
+  return { x, y };
+}
 
 function processMerges() {
   const used = new Set();
@@ -206,26 +239,17 @@ function processMerges() {
     World.remove(world, a); World.remove(world, b);
     const t = a.tier;
 
-    if (t < TOP) {
-      const nt = t + 1;
-      const nb = makeBody(mx, my, nt);
-      Body.setVelocity(nb, { x: 0, y: -1.2 });
-      World.add(world, nb);
-      setScore(score + TIERS[nt].pts);
-      fx.push({ kind: 'ring', x: mx, y: my, t0: performance.now(), life: 420, r: TIERS[t].r * 1.1, hue: nt });
-      fx.push({ kind: 'dust', x: mx, y: my, t0: performance.now(), life: 520, n: 10, r: TIERS[t].r });
-      fx.push({ kind: 'text', x: mx, y: my - TIERS[nt].r * 0.6, t0: performance.now(), life: 760,
-        txt: '+' + TIERS[nt].pts });
-      sMerge(nt);
-      if (nt === TOP) fx.push({ kind: 'halo', x: mx, y: my, t0: performance.now(), life: 1400, r: TIERS[nt].r });
-    } else {
-      // 两个顶级天使相碰：双双升天，给大奖
-      setScore(score + 500);
-      fx.push({ kind: 'text', x: mx, y: my - 20, t0: performance.now(), life: 1100, txt: '+500 升天!', big: true });
-      fx.push({ kind: 'ring', x: mx, y: my, t0: performance.now(), life: 620, r: TIERS[TOP].r * 1.2, hue: TOP });
-      fx.push({ kind: 'dust', x: mx, y: my, t0: performance.now(), life: 900, n: 26, r: TIERS[TOP].r });
-      sBoom();
-    }
+    const nt = t + 1;
+    const sp = freeSpot(mx, my, nt);
+    const nb = makeBody(sp.x, sp.y, nt);
+    Body.setVelocity(nb, { x: 0, y: -1.2 });
+    World.add(world, nb);
+    setScore(score + TIERS[nt].pts);
+    fx.push({ kind: 'ring', x: mx, y: my, t0: performance.now(), life: 420, r: TIERS[t].r * 1.1, hue: nt });
+    fx.push({ kind: 'dust', x: mx, y: my, t0: performance.now(), life: 520, n: 10, r: TIERS[t].r });
+    fx.push({ kind: 'text', x: mx, y: my - TIERS[nt].r * 0.6, t0: performance.now(), life: 760, txt: '+' + TIERS[nt].pts });
+    sMerge(nt);
+    if (nt === TOP) fx.push({ kind: 'halo', x: mx, y: my, t0: performance.now(), life: 1400, r: TIERS[nt].r });
   }
   merges = [];
 }
@@ -238,19 +262,32 @@ function drawnBox(tier) {
   return t.ar >= 1 ? { w: L, h: L / t.ar } : { w: L * t.ar, h: L };
 }
 // 碰撞体 = 立绘包围盒缩一点（K），平边相贴 => 消除圆碰撞体留下的缝
-const COL_K = 0.95;
+const COL_K = 1.0;   // 碰撞体=贴图实际尺寸：不再预留交叠余量，避免穿模观感
 function colliderBox(tier) {
   const d = drawnBox(tier);
   return { w: d.w * COL_K, h: d.h * COL_K };
 }
 // 贴合贴图轮廓的凹多边形碰撞体（scripts/gen_outline.js 由 alpha 通道生成，归一化到主体包围盒）
-function hullVerts(tier) {
-  const h = window.OUTLINES[TIERS[tier].file];
+function hullParts(tier) {
   const c = colliderBox(tier);
-  return h.pts.map(([x, y]) => ({ x: x * c.w, y: y * c.h }));
+  return window.COLLIDERS[TIERS[tier].file].parts.map((part) => part.map(([x, y]) => ({ x: x * c.w, y: y * c.h })));
 }
+// 贴合贴图的碰撞体：条带点集合并后求凸包（单凸体）。
+// 凹多边形分解与条带复合体都试过：Matter 在 20+ 件堆叠时推不开（实测穿透 70-90px），
+// 单凸体是唯一堆叠稳健的选择；凹口（举手腋下等）会被凸包填掉，靠 COL_K 略缩补偿观感。
+function hull2d(pts) {
+  const p = pts.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo = [], hi = [];
+  for (const q of p) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (hi.length >= 2 && cross(hi[hi.length - 2], hi[hi.length - 1], q) <= 0) hi.pop(); hi.push(q); }
+  lo.pop(); hi.pop();
+  return lo.concat(hi);
+}
+const HULLS = TIERS.map((t, i) => hull2d(hullParts(i).flat()));
+function hullVerts(tier) { return HULLS[tier]; }
 function hullExt(tier) {
-  const h = window.OUTLINES[TIERS[tier].file];
+  const h = window.COLLIDERS[TIERS[tier].file];
   const c = colliderBox(tier);
   return {
     hw: Math.max(-h.ext.l, h.ext.r) * c.w,      // 半宽
@@ -288,7 +325,11 @@ function checkOver(now) {
   for (const b of pieces()) {
     if (now - b.born < 500) continue;
     const topY = artCenter(b).y + hullExt(b.tier).top;
-    const calm = b.speed < 0.28;
+    // 用位置增量判静止：去穿透的位置修正会让 speed 失真，位置增量不会
+    const dx = b.position.x - (b.px == null ? b.position.x : b.px);
+    const dy = b.position.y - (b.py == null ? b.position.y : b.py);
+    b.px = b.position.x; b.py = b.position.y;
+    const calm = Math.hypot(dx, dy) < 1.2;
     if (topY < DROP_LINE && calm) {
       if (b.overSince == null) b.overSince = now;
       else if (now - b.overSince > OVER_MS) return true;
@@ -416,17 +457,36 @@ function drawFx(now) {
   }
 }
 
+
+/* 收容：位置修正可能把刚体一步推出侧墙，这里每帧夹回场内，杜绝飞出场外 */
+function contain() {
+  for (const b of pieces()) {
+    const e = hullExt(b.tier);
+    const minX = WALL + e.hw * 0.6, maxX = W - WALL - e.hw * 0.6;
+    if (b.position.x < minX) Body.setPosition(b, { x: minX, y: b.position.y });
+    else if (b.position.x > maxX) Body.setPosition(b, { x: maxX, y: b.position.y });
+    if (b.position.y > H + 300) { b.dead = true; fellOut++; World.remove(world, b); }   // 万一掉出世界直接清掉，不卡判负
+    if (b.position.y < -60) {   // 上边界护栏：被挤飞的棋子拦住并消掉上冲速度，不许飞出画面
+      Body.setPosition(b, { x: b.position.x, y: -60 });
+      if (b.velocity.y < 0) Body.setVelocity(b, { x: b.velocity.x, y: 0 });
+    }
+  }
+}
+
 /* 倾角软上限：轮廓刚体被推过支撑面后侧躺是稳定平衡会起不来；
    这里在 |angle| 超过 MAX_TILT 时施加恢复，把它平滑拽回上限内（不倒翁的"自己爬起来"）。 */
 function stabilize() {
   for (const b of pieces()) {
+    // 速度上限：任何原因（合成落点、挤压）导致的爆速都夹住，杜绝弹飞出场
+    const sp = Math.hypot(b.velocity.x, b.velocity.y);
+    if (sp > 22) Body.setVelocity(b, { x: b.velocity.x * 22 / sp, y: b.velocity.y * 22 / sp });
     let a = b.angle;
     while (a > Math.PI) a -= Math.PI * 2;
     while (a < -Math.PI) a += Math.PI * 2;
     if (Math.abs(a) <= MAX_TILT) continue;
     const target = Math.sign(a) * MAX_TILT;
-    Body.setAngle(b, b.angle + (target - a) * 0.14);
-    Body.setAngularVelocity(b, b.angularVelocity * 0.55);
+    // 不用 setAngle 硬转（会把身体 teleport 进邻居），改用角速度平滑归位，让求解器继续管接触
+    Body.setAngularVelocity(b, b.angularVelocity * 0.5 + clamp((target - a) * 0.06, -0.12, 0.12));
   }
 }
 
@@ -436,7 +496,9 @@ function frame(now) {
   const dt = Math.min(32, now - last); last = now;
   if (!over) simTime += dt;
   if (!over) {
-    for (let i = 0; i < SIM_SPEED; i++) Engine.update(engine, dt);   // 子步数=速度倍率，比调重力稳
+    const sdt = dt / SIM_SPEED;   // 倍速=更多更小的步，而不是更大的步：单步穿透深度不随倍速变大
+    for (let i = 0; i < SIM_SPEED; i++) Engine.update(engine, sdt);
+    contain();
     stabilize();
     processMerges();
     if (started && checkOver(simTime)) gameOver();
@@ -458,15 +520,16 @@ window.NAIWA = {
   // 后台标签页 rAF 会暂停，用这个手动推进物理做无头验证
   step(n, dt) {
     for (let i = 0; i < (n || 1); i++) {
-      const sdt = dt || 16.7; simTime += sdt;
-      Engine.update(engine, sdt); stabilize(); processMerges();
+      const full = dt || 16.7, sdt = full / SIM_SPEED;
+      for (let k = 0; k < SIM_SPEED; k++) { simTime += sdt; Engine.update(engine, sdt); }
+      contain(); stabilize(); processMerges();
       if (started && checkOver(simTime)) gameOver();
     }
   },
   render() { drawBackdrop(); for (const b of pieces()) { const c = artCenter(b); drawTier(b.tier, c.x, c.y, null, b.angle); } drawAim(); drawFx(performance.now()); },
   stat() {
     return {
-      score, best, pieces: pieces().length, tiers: pieces().map((b) => b.tier), over, cur: curTier, next: nextTier,
+      score, best, fellOut, pieces: pieces().length, tiers: pieces().map((b) => b.tier), over, cur: curTier, next: nextTier,
       // 调试用：每个体的倾角(度)，验证重心扶正效果
       angles: pieces().map((b) => Math.round((b.angle * 180 / Math.PI) % 360)),
       // 调试用：堆顶 y（越小越高），调 DROP_LINE 用
@@ -474,6 +537,7 @@ window.NAIWA = {
     };
   },
   reset, TIERS, engine, world,
+  fell() { return fellOut; },
   // 自检：八阶「贴图 + 真实碰撞体(分解后的凸部件)」叠图，红线即实际碰撞几何
   colliderSheet() {
     const cell = 170, pad = 8, cols = 4, rows = 2;

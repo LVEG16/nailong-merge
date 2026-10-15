@@ -67,6 +67,7 @@ function layout() {
 layout();
 addEventListener('resize', layout);
 addEventListener('orientationchange', layout);
+addEventListener('load', layout);   // 资源全部就绪后再校准一次（字体/图片万一影响高度）
 
 /* ---------------- 素材 ---------------- */
 const imgs = TIERS.map((t) => {
@@ -423,6 +424,10 @@ el.chain.innerHTML = TIERS.map((t, i) =>
   `<div class="slot${i === TOP ? ' max' : ''}"><img src="assets/${t.file}.png" alt="${t.name}"><span class="n">${i + 1}</span></div>` +
   (i < TOP ? '<span class="arrow">›</span>' : '')
 ).join('');
+/* 首次 layout() 跑在 chain 填充之前：那时链高 0，画布多分了 50 多像素，
+   chain 补上后没人重算 —— 页面整体超出视口，底部提示被裁。
+   这里（以及 load 事件）补一次校准，保证"高度分配"基于完整 DOM。 */
+layout();
 
 /* ---------------- 绘制 ---------------- */
 function drawTier(tier, x, y, alpha, angle) {

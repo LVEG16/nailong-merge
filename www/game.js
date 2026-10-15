@@ -10,7 +10,7 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 /* ---------------- 可调参数 ---------------- */
 const W = 360, H = 620;          // 逻辑画布（收窄以贴近参考图比例，也让堆叠更快触线）
 const WALL = 16, FLOOR = 18;     // 侧壁 / 地板厚度
-const DROP_LINE = 240;           // 虚线：奶龙顶部越过它并停住即判负
+const DROP_LINE = 200;           // 虚线：奶龙顶部越过它并停住即判负（已抬高，给下方多留 40 的堆叠空间）
 const HOLD_Y = 64;               // 手持件中心高度
 const DROP_CD = 380;             // 两次投放最小间隔(ms)
 const OVER_MS = 1250;            // 压线停留多久判负(ms)
@@ -63,6 +63,16 @@ function layout() {
   canvas.style.height = Math.round(cssH) + 'px';
   canvas.style.width = Math.round(cssW) + 'px';
   boardEl.style.width = Math.round(cssW + 2) + 'px';   // border-box，含 1px 边框×2
+  /* 兜底收敛：若因字体渲染/换行等环境差异页面仍超出视口（scrollHeight 校验），
+     按溢出量再收紧一次画布，保证"底部提示永不落屏外"；正常环境此分支不触发。 */
+  const overPx = document.documentElement.scrollHeight - window.innerHeight;
+  if (overPx > 2) {
+    const h2 = Math.max(300, cssH - overPx);
+    const w2 = Math.round(h2 * W / H);
+    canvas.style.height = Math.round(h2) + 'px';
+    canvas.style.width = w2 + 'px';
+    boardEl.style.width = w2 + 2 + 'px';
+  }
 }
 layout();
 addEventListener('resize', layout);

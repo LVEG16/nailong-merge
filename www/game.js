@@ -279,8 +279,10 @@ function processMerges() {
       }
       if (simTime < a.readyAt || simTime < b.readyAt) continue;
       deferredMerges.delete(key);
-      // 直接检查当前部件几何，既支持休眠体，也防止已分离的旧接触隔空合成。
-      if (Matter.Query.collides(a, [b]).length) merges.push([a, b]);
+      // Query 只展开候选 b 的部件；查询体 a 也必须逐部件检查，
+      // 否则复合体的父凸包会把刀盾等角色的凹口空隙误判成接触。
+      const parts = a.parts.length > 1 ? a.parts.slice(1) : [a];
+      if (parts.some(part => Matter.Query.collides(part, [b]).length)) merges.push([a, b]);
     }
   }
   const used = new Set();

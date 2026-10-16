@@ -97,6 +97,24 @@ test('deferred compound contacts merge even while both parents are sleeping', ()
   assert.equal(host.game.stat().score, 320);
 });
 
+test('a compound parent hull cannot bridge an empty gap after cooldown', () => {
+  const host = createGame();
+  const a = host.game.mk(180, 500, 2), b = host.game.mk(180, 500, 2);
+  host.Matter.World.add(host.game.world, [a, b]);
+  host.advance();
+  host.Matter.Body.setAngle(a, 0);
+  host.Matter.Body.setPosition(a, { x: 180, y: 350 });
+  host.Matter.Body.setAngle(b, -0.52);
+  host.Matter.Body.setPosition(b, { x: 124, y: 434 });
+  for (const body of [a, b]) host.Matter.Sleeping.set(body, true);
+  const realParts = body => body.parts.slice(1);
+  const actuallyTouching = realParts(a).some(pa => realParts(b).some(pb => host.Matter.Collision.collides(pa, pb)));
+  assert.equal(actuallyTouching, false, 'the real component shapes are separated');
+  host.advance(40);
+  assert.equal(host.game.stat().pieces, 2, 'empty regions of parent hulls must not trigger merges');
+  assert.equal(host.game.stat().score, 0);
+});
+
 test('compound collider contacts resolve to parent tiers and score once', () => {
   const host = createGame();
   const bodies = [host.game.mk(180, 500, 2), host.game.mk(180, 500, 2)];

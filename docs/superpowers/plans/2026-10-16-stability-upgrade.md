@@ -51,7 +51,7 @@
 - [x] Add push/PR checks on Ubuntu and Windows using Node 24, `actions/checkout@v4`, `actions/setup-node@v4`, `permissions: contents: read`, and `npm test`. Add an image QA job that installs only `sharp@0.33.5` under the runner's temporary directory, exports `NODE_PATH`, and runs `npm run test:preview`. Do not run install hooks for AI packages or deploy.
 - [x] Run `npm test`, `npm run test:preview`, `git diff --check`; inspect generated preview images and final diff. Attempt browser verification via the supported Tabbit CLI; if unavailable, record exact limitation without claiming browser validation.
 - [x] Request an independent code-review subagent with the approved spec, baseline SHA `635f7b437ad2972051c34e53b394c4b36593203f`, final SHA, repository path and test results. Address substantive findings and rerun affected checks.
-- [ ] Commit final documentation/checks. Fetch upstream, verify the final branch diff and clean working tree; push to `han-yi-1212/nailong-merge:feat/stability-upgrade` and open a PR targeting upstream `main` using a UTF-8 body file. Verify PR URL, base/head and check results; report any genuinely pending CI or browser checks.
+- [x] Commit final documentation/checks. Fetch upstream, verify the final branch diff and clean working tree; push to `han-yi-1212/nailong-merge:feat/stability-upgrade` and open a PR targeting upstream `main` using a UTF-8 body file. Verify PR URL, base/head and check results; report any genuinely pending CI or browser checks. Delivered as upstream PR #1; see `docs/superpowers/evals/2026-10-16-stability-upgrade.md`.
 
 ## Plan self-review
 

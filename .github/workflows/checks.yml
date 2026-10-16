@@ -25,8 +25,6 @@ jobs:
   preview:
     name: Eight-tier previews
     runs-on: ubuntu-latest
-    env:
-      NODE_PATH: ${{ runner.temp }}/nailong-preview/node_modules
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,4 +33,6 @@ jobs:
       - name: Install image QA dependency only
         run: npm install --prefix "$RUNNER_TEMP/nailong-preview" --ignore-scripts --no-audit --no-fund sharp@0.33.5
       - name: Verify complete previews and invalid input handling
+        env:
+          NODE_PATH: ${{ runner.temp }}/nailong-preview/node_modules
         run: npm run test:preview

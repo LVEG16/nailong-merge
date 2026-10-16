@@ -71,6 +71,32 @@ test('three simultaneous contacts consume each piece at most once', () => {
   assert.deepEqual(Array.from(host.game.stat().tiers).sort(), [0, 1]);
 });
 
+test('three deferred sleeping contacts still award only one merge at expiry', () => {
+  const host = createGame();
+  const bodies = [140, 180, 220].map(x => host.game.mk(x, 550, 0));
+  host.Matter.World.add(host.game.world, bodies);
+  host.advance();
+  for (const body of bodies) host.Matter.Sleeping.set(body, true);
+  host.advance(31);
+  assert.equal(host.game.stat().pieces, 2);
+  assert.equal(host.game.stat().score, 5);
+  assert.deepEqual(Array.from(host.game.stat().tiers).sort(), [0, 1]);
+});
+
+test('deferred compound contacts merge even while both parents are sleeping', () => {
+  const host = createGame();
+  const bodies = [host.game.mk(180, 500, 6), host.game.mk(180, 500, 6)];
+  assert.ok(bodies.every(body => body.parts.length > 1));
+  host.Matter.World.add(host.game.world, bodies);
+  host.advance();
+  assert.ok(host.Matter.Query.collides(bodies[0], [bodies[1]]).length);
+  for (const body of bodies) host.Matter.Sleeping.set(body, true);
+  host.advance(90);
+  assert.equal(host.game.stat().pieces, 1);
+  assert.deepEqual(Array.from(host.game.stat().tiers), [7]);
+  assert.equal(host.game.stat().score, 320);
+});
+
 test('compound collider contacts resolve to parent tiers and score once', () => {
   const host = createGame();
   const bodies = [host.game.mk(180, 500, 2), host.game.mk(180, 500, 2)];

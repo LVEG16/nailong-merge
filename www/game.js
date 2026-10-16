@@ -29,10 +29,10 @@ const TIERS = [
   { file: '07_angel', name: '天使', r: 106, f: 1.10, ar: 0.80, com: 0.48, pts: 160 },
   { file: '08_wave', name: '奶龙', r: 120, f: 1.06, ar: 0.70, com: 0.50, pts: 320 },
 ];
-const SIM_SPEED = 4;   // 每帧子步数：倍速=更多更小的步   // 每帧物理子步数：2 = 整体速度翻倍（掉落/滑落/ settling 都快一倍）
+const PHYSICS_SUBSTEPS = 4;   // 每帧分成四个物理子步，总推进时间仍为 dt；增加子步不等于加速
 let MAX_TILT = 0.52; // 倾角软上限(~30°)：范围内纯物理，超出用恢复力矩拽回，防止躺平/倒立
 const TOP = TIERS.length - 1;
-// 只投前三阶：手持件才不会顶出画面，也贴近参考图"掉最小的"手感
+// 只投前五阶，权重与现有难度保持一致。
 const SPAWN_W = [0.30, 0.26, 0.20, 0.14, 0.10];   // 五阶投放：场上种类多 -> 同阶相邻概率低 -> 堆才长得起来（合成大西瓜靠 11 阶达到同样效果）
 const BEST_KEY = 'nailong.best.v1';
 
@@ -215,6 +215,7 @@ function reset() {
   Matter.Pairs.clear(engine.pairs);   // 上一局的接触对里还留着已删除刚体，不清会污染碰撞检测/统计
   fx.length = 0;
   merges.length = 0;          // 清掉未处理的合成队列，否则重开瞬间可能冒出幽灵合成
+  deferredMerges.clear();
   over = false; started = false; lastDrop = -9999;
   bestAtStart = best;
   el.over.hidden = true;
@@ -224,6 +225,7 @@ function reset() {
 
 /* ---------------- 合成 ---------------- */
 let merges = [];
+const deferredMerges = new Map();
 // 凹多边形刚体是复合体，碰撞 pair 里给的是子部件，要沿 parent 链取到带 tier 的根刚体
 const rootBody = (b) => { let x = b; while (x.parent && x.parent !== x) x = x.parent; return x; };
 /* 支撑追踪：倾角扶正只对"有东西托着"的棋子生效，
@@ -241,7 +243,12 @@ Events.on(engine, 'collisionStart', (ev) => {
     if (a.tier === undefined || b.tier === undefined) continue;
     if (a.tier !== b.tier || a.dead || b.dead) continue;
     if (a.tier === TOP) continue;   // 顶级为终端阶：不再合成，留在场上堵堆（合成大西瓜的经典压力源）
-    if (simTime < a.readyAt || simTime < b.readyAt) continue;
+    if (simTime < a.readyAt || simTime < b.readyAt) {
+      // 冷却内的首次接触也要保留：静止/休眠后未必再有 collisionStart。
+      const key = Math.min(a.id, b.id) + ':' + Math.max(a.id, b.id);
+      deferredMerges.set(key, [a, b]);
+      continue;
+    }
     merges.push([a, b]);
   }
 });
@@ -263,6 +270,21 @@ function freeSpot(x, y, tier) {
 }
 
 function processMerges() {
+  if (deferredMerges.size) {
+    const live = new Set(pieces());
+    for (const [key, [a, b]] of deferredMerges) {
+      if (!live.has(a) || !live.has(b) || a.tier !== b.tier || a.tier === TOP) {
+        deferredMerges.delete(key);
+        continue;
+      }
+      if (simTime < a.readyAt || simTime < b.readyAt) continue;
+      deferredMerges.delete(key);
+      // Query 只展开候选 b 的部件；查询体 a 也必须逐部件检查，
+      // 否则复合体的父凸包会把刀盾等角色的凹口空隙误判成接触。
+      const parts = a.parts.length > 1 ? a.parts.slice(1) : [a];
+      if (parts.some(part => Matter.Query.collides(part, [b]).length)) merges.push([a, b]);
+    }
+  }
   const used = new Set();
   for (const [a, b] of merges) {
     if (used.has(a.id) || used.has(b.id) || a.dead || b.dead) continue;
@@ -561,8 +583,8 @@ function frame(now) {
   const dt = Math.min(32, now - last); last = now;
   if (!over) simTime += dt;
   if (!over) {
-    const sdt = dt / SIM_SPEED;   // 倍速=更多更小的步，而不是更大的步：单步穿透深度不随倍速变大
-    for (let i = 0; i < SIM_SPEED; i++) Engine.update(engine, sdt);
+    const sdt = dt / PHYSICS_SUBSTEPS;
+    for (let i = 0; i < PHYSICS_SUBSTEPS; i++) Engine.update(engine, sdt);
     contain();
     stabilize();
     processMerges();
@@ -585,8 +607,8 @@ window.NAIWA = {
   // 后台标签页 rAF 会暂停，用这个手动推进物理做无头验证
   step(n, dt) {
     for (let i = 0; i < (n || 1); i++) {
-      const full = dt || 16.7, sdt = full / SIM_SPEED;
-      for (let k = 0; k < SIM_SPEED; k++) { simTime += sdt; Engine.update(engine, sdt); }
+      const full = dt || 16.7, sdt = full / PHYSICS_SUBSTEPS;
+      for (let k = 0; k < PHYSICS_SUBSTEPS; k++) { simTime += sdt; Engine.update(engine, sdt); }
       contain(); stabilize(); processMerges();
       if (started && checkOver(simTime)) gameOver();
     }

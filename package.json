@@ -1,4 +1,10 @@
 {
+  "scripts": {
+    "start": "node serve.js",
+    "test": "node --test tests/*.test.cjs",
+    "preview": "node scripts/preview.js",
+    "test:preview": "node --test tests/preview.integration.cjs"
+  },
   "dependencies": {
     "@imgly/background-removal-node": "1.4.5",
     "matter-js": "^0.19.0",

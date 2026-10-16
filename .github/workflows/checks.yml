@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rules:
+    name: Rules (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test real game rules without installing dependencies
+        run: npm test
+
+  preview:
+    name: Eight-tier previews
+    runs-on: ubuntu-latest
+    env:
+      NODE_PATH: ${{ runner.temp }}/nailong-preview/node_modules
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install image QA dependency only
+        run: npm install --prefix "$RUNNER_TEMP/nailong-preview" --ignore-scripts --no-audit --no-fund sharp@0.33.5
+      - name: Verify complete previews and invalid input handling
+        run: npm run test:preview
